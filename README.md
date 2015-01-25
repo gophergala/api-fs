@@ -19,18 +19,18 @@ For example:
  apifs -mountpoint=/mnt/apifs &
  mkdir -p /mnt/apifs/golang.org/pkg
 
-Each subdirectory in apifs contains two files, `ctl` and `body`. To execute a
-request, write to `ctl` and close the file. Valid `ctl` file formats are
-described below.
+Each subdirectory in apifs contains one file, `clone`. To initiate a new 
+connection, read from `clone`. The resulting ID `n` will be the ID of the next
+connection, with the side effect of creating two files, `n.ctl` and `n.body`.
 
-To read the request response, read the `body` file in the same directory. If
-the request was successful, `body` will contain the full body of the response.
-Reads from `body` will block until `ctl` has been closed and the request has
-finished.
+To read the request response, read the `n.body` file in the same directory. If
+the request was successful, `n.body` will contain the full body of the
+response. Reads from `n.body` will block until `n.ctl` has been closed and the
+request has finished.
 
 # Control file
 
-The control file `ctl` contains a newline-delimited list of arguments for the
+The control file `n.ctl` contains a newline-delimited list of arguments for the
 request. Valid forms are as follows:
 
 * method method_type: HTTP request method
