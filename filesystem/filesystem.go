@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/gophergala/api-fs/api"
@@ -95,32 +96,50 @@ func (d *RootDir) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Err
 	return n, nil
 }
 
+type connection struct {
+	ctlFile  *ControlFile
+	bodyFile *bodyFile
+}
+
+func newConnection(inode uint64, fullpath string) *connection {
+	ctl := newControlFile(inode, fullpath)
+	body := newBodyFile(inode, ctl)
+
+	return &connection{
+		ctlFile:  ctl,
+		bodyFile: body,
+	}
+}
+
 // ResourceDir represents an HTTP API resource directory.
 type ResourceDir struct {
 	name     string
 	fullpath string
 	inode    uint64
-	ctlFile  *ControlFile
-	bodyFile *bodyFile
 	dirs     []*ResourceDir
 	dirMap   map[string]int
+	conns    []*connection
+	connMap  map[string]fs.Node
+	clone    *CloneFile
 	sync.Mutex
 }
 
 func newResourceDir(parent uint64, name string, parentPath string) *ResourceDir {
 	inode := fs.GenerateDynamicInode(parent, name)
 	fullpath := fmt.Sprintf("%s/%s", parentPath, name)
-	ctl := newControlFile(inode, fullpath)
-	body := newBodyFile(inode, ctl)
 	dirMap := map[string]int{}
-	return &ResourceDir{
+	connMap := map[string]fs.Node{}
+	d := &ResourceDir{
 		name:     name,
 		fullpath: fullpath,
 		inode:    inode,
-		ctlFile:  ctl,
-		bodyFile: body,
 		dirMap:   dirMap,
+		connMap:  connMap,
 	}
+	clone := newCloneFile(d)
+	d.clone = clone
+
+	return d
 }
 
 func (d *ResourceDir) Attr() fuse.Attr {
@@ -133,6 +152,21 @@ func (d *ResourceDir) Attr() fuse.Attr {
 	return attr
 }
 
+func (d *ResourceDir) addConn(prefix string) {
+	d.Lock()
+	defer d.Unlock()
+
+	log.Printf("addConn %d", d.inode)
+
+	conn := newConnection(d.inode, d.fullpath)
+	ctlStr := fmt.Sprintf("%s.ctl", prefix)
+	bodyStr := fmt.Sprintf("%s.body", prefix)
+
+	d.conns = append(d.conns, conn)
+	d.connMap[ctlStr] = conn.ctlFile
+	d.connMap[bodyStr] = conn.bodyFile
+}
+
 func (d *ResourceDir) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 	d.Lock()
 	defer d.Unlock()
@@ -141,11 +175,7 @@ func (d *ResourceDir) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 
 	dirs := []fuse.Dirent{
 		{
-			Name: "ctl",
-			Type: fuse.DT_File,
-		},
-		{
-			Name: "body",
+			Name: "clone",
 			Type: fuse.DT_File,
 		},
 	}
@@ -156,7 +186,16 @@ func (d *ResourceDir) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 		subdirs[i].Type = fuse.DT_Dir
 	}
 
+	conns := make([]fuse.Dirent, len(d.connMap))
+	i := 0
+	for k := range d.connMap {
+		conns[i].Name = k
+		conns[i].Type = fuse.DT_Dir
+		i++
+	}
+
 	dirs = append(dirs, subdirs...)
+	dirs = append(dirs, conns...)
 
 	log.Printf("ReadDir %d complete %#v", d.inode, dirs)
 
@@ -188,16 +227,99 @@ func (d *ResourceDir) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
 		err fuse.Error
 	)
 
-	switch name {
-	case "ctl":
-		n = d.ctlFile
-	case "body":
-		n = d.bodyFile
+	switch {
+	case name == "clone":
+		n = d.clone
 	default:
-		err = fuse.ENOENT
+		if f, ok := d.connMap[name]; ok {
+			n = f
+		} else {
+			err = fuse.ENOENT
+		}
 	}
 
 	return n, err
+}
+
+// CloneFile issues the next available connection for use.
+type CloneFile struct {
+	next  chan string
+	inode uint64
+	q     chan struct{}
+	d     *ResourceDir
+}
+
+func newCloneFile(d *ResourceDir) *CloneFile {
+	ch := make(chan string)
+	q := make(chan struct{})
+	inode := fs.GenerateDynamicInode(d.inode, "clone")
+
+	go func() {
+		i := 0
+		for {
+			select {
+			case <-q:
+				return
+			default:
+				ch <- strconv.Itoa(i)
+				i++
+			}
+		}
+	}()
+
+	f := CloneFile{
+		next:  ch,
+		inode: inode,
+		q:     q,
+		d:     d,
+	}
+
+	return &f
+}
+
+func (f *CloneFile) Attr() fuse.Attr {
+	attr := fuse.Attr{
+		Inode: f.inode,
+		Size:  0,
+		Mode:  0777,
+	}
+
+	return attr
+}
+
+type cloneHandle struct {
+	f  *CloneFile
+	id fuse.HandleID
+}
+
+func (f *CloneFile) Open(req *fuse.OpenRequest, resp *fuse.OpenResponse,
+	intr fs.Intr) (fs.Handle, fuse.Error) {
+
+	log.Printf("Open %d %d", f.inode, req.Node)
+
+	var u fuse.HandleID
+
+	u = fuse.HandleID(rand.Uint32()) + fuse.HandleID(rand.Uint32()<<32)
+
+	h := &cloneHandle{
+		f:  f,
+		id: u,
+	}
+
+	resp.Handle = u
+	resp.Flags = resp.Flags | fuse.OpenDirectIO
+
+	return h, nil
+}
+
+func (h *cloneHandle) ReadAll(intr fs.Intr) ([]byte, fuse.Error) {
+	s := <-h.f.next
+
+	h.f.d.addConn(s)
+
+	s = fmt.Sprintf("%s\n", s)
+
+	return []byte(s), nil
 }
 
 // ControlFile wraps around a []byte, doing syntax checking on write.
