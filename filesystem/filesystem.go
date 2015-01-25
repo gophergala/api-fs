@@ -170,23 +170,36 @@ func (f *ControlFile) writeAt(b []byte, i int64) (n int, err error) {
 	f.m.Lock()
 	defer f.m.Unlock()
 
-	if i > int64(len(f.data))+1 {
-		return 0, fuse.ERANGE
-	}
-
-	// Grow ahead of time if we need to
+	// Get total size ahead of time
 	totalSize := int64(len(b)) + i
-	if int64(len(f.data)) < totalSize {
-		newData := make([]byte, totalSize)
-		copy(newData, f.data)
-		f.data = newData
+
+	switch {
+	case i > int64(len(f.data))+1:
+		return 0, fuse.ERANGE
+	case i == 0:
+		f.data = b
+		return len(b), nil
+	default:
+
+		if int64(len(f.data)) < totalSize {
+			newData := make([]byte, totalSize)
+			copy(newData, f.data)
+			f.data = newData
+		}
+
+		// Write!
+		iInt := int(i)
+		copy(f.data[iInt:len(b)+iInt], b)
+
+		return len(b), nil
 	}
+}
 
-	// Write!
-	iInt := int(i)
-	copy(f.data[iInt:len(b)+iInt], b)
+func (f *ControlFile) Fsync(req *fuse.FsyncRequest, intr fs.Intr) fuse.Error {
 
-	return len(b), nil
+	log.Printf("Fsync %d", f.inode)
+
+	return nil
 }
 
 type controlHandle struct {
@@ -265,6 +278,22 @@ func (h *controlHandle) Write(req *fuse.WriteRequest,
 	resp.Size = len(req.Data)
 
 	log.Printf("Write %d complete: %#v", h.id, resp)
+
+	return nil
+}
+
+func (h *controlHandle) Flush(req *fuse.FlushRequest,
+	intr fs.Intr) fuse.Error {
+
+	log.Printf("Flush %d", h.id)
+
+	return nil
+}
+
+func (h *controlHandle) Release(req *fuse.ReleaseRequest,
+	intr fs.Intr) fuse.Error {
+
+	log.Printf("Release %d", h.id)
 
 	return nil
 }
