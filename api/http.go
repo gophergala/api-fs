@@ -1,42 +1,59 @@
-package http
+package api
 
-import "net/http"
+import (
+	"io"
+	"log"
+	"net/http"
+)
 
 /*
 Formats:
 
-param value
-
-paramlist
-	param value
-	param value
-	param value
+param key (value)
 */
 
-type params struct {
-	method  string
-	query   map[string][]string
-	headers map[string][]string
+type Params struct {
+	URL     string
+	Method  string
+	Query   map[string][]string
+	Headers map[string][]string
 }
 
-func buildRequest(urlStr string, p params) (*http.Request, error) {
-	r, err := http.NewRequest(p.method, urlStr, nil)
+func buildRequest(p Params) (*http.Request, error) {
+	r, err := http.NewRequest(p.Method, p.URL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	for k, vs := range p.headers {
-		for v := range vs {
+	for k, vs := range p.Headers {
+		for _, v := range vs {
 			r.Header.Add(k, v)
 		}
 	}
 
 	q := r.URL.Query()
 	for k, vs := range q {
-		for v := range vs {
+		for _, v := range vs {
 			q.Add(k, v)
 		}
 	}
 
 	return r, nil
+}
+
+func DoRequest(p Params) (io.ReadCloser, error) {
+	log.Printf("HTTP %#v %#v", p.Method, p.URL)
+	req, err := buildRequest(p)
+	if err != nil {
+		return nil, err
+	}
+
+	var c http.Client
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Body, nil
 }
