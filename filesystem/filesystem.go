@@ -100,6 +100,9 @@ type ResourceDir struct {
 	inode    uint64
 	ctlFile  *ControlFile
 	bodyFile *bodyFile
+	dirs     []*ResourceDir
+	dirMap   map[string]int
+	sync.Mutex
 }
 
 func newResourceDir(parent uint64, name string, parentPath string) *ResourceDir {
@@ -107,12 +110,14 @@ func newResourceDir(parent uint64, name string, parentPath string) *ResourceDir 
 	fullpath := fmt.Sprintf("%s/%s", parentPath, name)
 	ctl := newControlFile(inode, fullpath)
 	body := newBodyFile(inode, ctl)
+	dirMap := map[string]int{}
 	return &ResourceDir{
 		name:     name,
 		fullpath: fullpath,
 		inode:    inode,
 		ctlFile:  ctl,
 		bodyFile: body,
+		dirMap:   dirMap,
 	}
 }
 
@@ -127,7 +132,10 @@ func (d *ResourceDir) Attr() fuse.Attr {
 }
 
 func (d *ResourceDir) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
-	log.Printf("%d: reading dir", d.inode)
+	d.Lock()
+	defer d.Unlock()
+
+	log.Printf("ReadDir %d", d.inode)
 
 	dirs := []fuse.Dirent{
 		{
@@ -140,10 +148,39 @@ func (d *ResourceDir) ReadDir(intr fs.Intr) ([]fuse.Dirent, fuse.Error) {
 		},
 	}
 
+	subdirs := make([]fuse.Dirent, len(d.dirs))
+	for i, s := range d.dirs {
+		subdirs[i].Name = s.name
+		subdirs[i].Type = fuse.DT_Dir
+	}
+
+	dirs = append(dirs, subdirs...)
+
+	log.Printf("ReadDir %d complete %#v", d.inode, dirs)
+
 	return dirs, nil
 }
 
+func (d *ResourceDir) Mkdir(req *fuse.MkdirRequest, intr fs.Intr) (fs.Node, fuse.Error) {
+	d.Lock()
+	defer d.Unlock()
+
+	log.Printf("Mkdir %d %s", d.inode, req.Name)
+	if _, ok := d.dirMap[req.Name]; ok {
+		return nil, fuse.EEXIST
+	}
+
+	n := newResourceDir(d.inode, req.Name, d.fullpath)
+	d.dirs = append(d.dirs, n)
+	d.dirMap[req.Name] = len(d.dirs) - 1
+
+	return n, nil
+}
+
 func (d *ResourceDir) Lookup(name string, intr fs.Intr) (fs.Node, fuse.Error) {
+	d.Lock()
+	defer d.Unlock()
+
 	var (
 		n   fs.Node
 		err fuse.Error
