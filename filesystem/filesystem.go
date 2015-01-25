@@ -11,6 +11,8 @@ import (
 
 	"github.com/gophergala/api-fs/api"
 
+	"bytes"
+
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 )
@@ -209,7 +211,6 @@ type ControlFile struct {
 
 func newControlFile(parent uint64, fullpath string) *ControlFile {
 	return &ControlFile{
-		data:  []byte("hello, world!\n"),
 		inode: parent,
 		ready: make(chan api.Params),
 		url:   fmt.Sprintf("http:/%s", fullpath),
@@ -388,9 +389,13 @@ func (h *controlHandle) Release(req *fuse.ReleaseRequest,
 	writeStr := " NOT"
 	if h.isWrite {
 		writeStr = ""
-		params := api.Params{
-			URL:    h.f.url,
-			Method: "GET",
+		b, err := h.ReadAll(intr)
+		if err != nil {
+			return err
+		}
+		params, err := api.NewParams(h.f.url, bytes.NewBuffer(b))
+		if err != nil {
+			return err
 		}
 		select {
 		case h.f.ready <- params:
